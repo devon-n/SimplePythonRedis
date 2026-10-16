@@ -12,9 +12,53 @@ class Disconnet(Exception): pass
 Error = namedtuple('Error', ('message',))
 
 Class ProtocolHandler(object):
+
+    def __init__(self):
+        self.handlers = {
+            '+': self.handle_simple_string,
+            '-': self.handle_error,
+            ':': self.handle_integer,
+            '$': self.handle_string,
+            '*': self.handle_array,
+            '%': self.handle_dict
+        }
+
     def handle_request(self, socket_file):
-        # Parse a request from the client into its component Parse
-        pass
+        # Parse a request from the client into its component
+        first_byte = socket_file.read(1)
+        if not first_byte:
+            raise Disconnet
+
+        try:
+            return self.handlers[first_byte](socket_file)
+
+        except KeyError:
+            raise CommandError('bad request')
+
+    def handle_simple_string(self, socket_file):
+        return socket_file.readline().rstrip('/r/n')
+
+    def handle_error(self, socket_file):
+        return Error(self.handle_simple_string(socket_file))
+
+    def handle_integer(self, socket_file):
+        return int(self.handle_simple_string(socket_file))
+
+    def handle_string(self, socket_file):
+        length = int(self.handle_simple_string(socket_file))
+        if length = -1:
+            return None
+        length += 2
+        return socket_file.read(length)[:-2]
+
+    def handle_array(self, socket_file):
+        num_elements = self.handle_integer(socket_file)
+        return [self.handle_request(socket_file) for _ in range(num_elements)]
+
+    def handle_dict(self, socket_file):
+        num_items = self.handle_integer(socket_file)
+        elements = [self.handle_request(socket_file) for _ in range (num_items * 2)]
+        return dict(zip(elements[::2], elements[1::2]))
 
     def write_response(self, socket_file, data):
         # Serialize the response data and send it to the client
