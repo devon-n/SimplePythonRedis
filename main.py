@@ -21,12 +21,12 @@ Error = namedtuple("Error", ("message",))
 class ProtocolHandler:
     def __init__(self):
         self.handlers = {
-            "+": self.handle_simple_string,
-            "-": self.handle_error,
-            ":": self.handle_integer,
-            "$": self.handle_string,
-            "*": self.handle_array,
-            "%": self.handle_dict,
+            b"+": self.handle_simple_string,
+            b"-": self.handle_error,
+            b":": self.handle_integer,
+            b"$": self.handle_string,
+            b"*": self.handle_array,
+            b"%": self.handle_dict,
         }
 
     def handle_request(self, socket_file):
@@ -42,7 +42,7 @@ class ProtocolHandler:
             raise CommandError("bad request")
 
     def handle_simple_string(self, socket_file):
-        return socket_file.readline().rstrip("/r/n")
+        return socket_file.readline().rstrip(b"\r\n")
 
     def handle_error(self, socket_file):
         return Error(self.handle_simple_string(socket_file))
@@ -79,22 +79,25 @@ class ProtocolHandler:
             data = data.encode("utf-8")
 
         if isinstance(data, bytes):
-            buf.write("$%s\r\n%s\r\n" % (len(data), data))
+            buf.write(b"$%d\r\n%s\r\n" % (len(data), data))
         elif isinstance(data, int):
-            buf.write(":%s\r\n" % data)
+            buf.write(b":%d\r\n" % data)
         elif isinstance(data, Error):
-            buf.write("-%s\r\n" % data.message)
+            msg = data.message
+            if isinstance(msg, str):
+                msg = msg.encode("utf-8")
+            buf.write(b"-%s\r\n" % msg)
         elif isinstance(data, (list, tuple)):
-            buf.write("*%s\r\n" % len(data))
+            buf.write(b"*%d\r\n" % len(data))
             for item in data:
                 self._write(buf, item)
         elif isinstance(data, dict):
-            buf.write("%%%s\r\n" % len(data))
+            buf.write(b"%%%d\r\n" % len(data))
             for key in data:
                 self._write(buf, key)
                 self._write(buf, data[key])
         elif data is None:
-            buf.write("$-1\r\n")
+            buf.write(b"$-1\r\n")
         else:
             raise CommandError("unrecognized type: %s" % type(data))
 
@@ -112,12 +115,12 @@ class Server:
 
     def get_commands(self):
         return {
-            "GET": self.get,
-            "SET": self.set,
-            "DELETE": self.delete,
-            "FLUSH": self.flush,
-            "MGET": self.mget,
-            "MSET": self.mset,
+            b"GET": self.get,
+            b"SET": self.set,
+            b"DELETE": self.delete,
+            b"FLUSH": self.flush,
+            b"MGET": self.mget,
+            b"MSET": self.mset,
         }
 
     def get(self, key):
@@ -142,7 +145,7 @@ class Server:
         return [self._kv.get(key) for key in keys]
 
     def mset(self, *items):
-        data = zip(items[::2], items[1::2])
+        data = list(zip(items[::2], items[1::2]))
         for key, value in data:
             self._kv[key] = value
 
@@ -153,24 +156,74 @@ class Server:
         socket_file = conn.makefile("rwb")
 
         # Process client requests until client Disconnet
-        data = 0
         while True:
             try:
                 data = self._protocol.handle_request(socket_file)
             except Disconnet:
                 break
 
-        try:
-            resp = self.get_response(data)
-        except CommandError as exc:
-            resp = Error(exc.args[0])
+            try:
+                resp = self.get_response(data)
+            except CommandError as exc:
+                resp = Error(exc.args[0])
+
+            self._protocol.write_response(socket_file, resp)
 
     def get_response(self, data):
-        # Unpack data sent by client
-        #
-        # Execute Command
-        # Pass back return value
-        pass
+        if not isinstance(data, list):
+            try:
+                data = data.split()
+            except Exception:
+                raise CommandError("Request must be list or simple string")
+
+        if not data:
+            raise CommandError("Missing command")
+
+        command = data[0].upper()
+        if command not in self._commands:
+            raise CommandError("Unrecognized command: %s" % command)
+
+        return self._commands[command](*data[1:])
 
     def run(self):
         self._server.serve_forever()
+
+
+class Client:
+    def __init__(self, host="127.0.0.1", port=31337):
+        self._protocol = ProtocolHandler()
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.connect((host, port))
+        self._fh = self._socket.makefile("rwb")
+
+    def execute(self, *args):
+        self._protocol.write_response(self._fh, args)
+        resp = self._protocol.handle_request(self._fh)
+        if isinstance(resp, Error):
+            raise CommandError(resp.message)
+        return resp
+
+    def get(self, key):
+        return self.execute("GET", key)
+
+    def set(self, key, value):
+        return self.execute("SET", key, value)
+
+    def delete(self, key):
+        return self.execute("DELETE", key)
+
+    def flush(self):
+        return self.execute("FLUSH")
+
+    def mget(self, *keys):
+        return self.execute("MGET", *keys)
+
+    def mset(self, *items):
+        return self.execute("MSET", *items)
+
+
+if __name__ == "__main__":
+    from gevent import monkey
+
+    monkey.patch_all()
+    Server().run()
